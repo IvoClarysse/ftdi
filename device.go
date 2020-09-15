@@ -29,9 +29,10 @@ func makeError(ctx *C.struct_ftdi_context, code C.int) error {
 }
 
 type USBDev struct {
-	Manufacturer, Description, Serial string
-
-	d *C.struct_libusb_device
+	Manufacturer string
+	Description  string
+	Serial       string
+	d            *C.struct_libusb_device
 }
 
 func (u *USBDev) unref() {
@@ -113,40 +114,6 @@ func (u *USBDev) getStrings(dev *C.libusb_device, ds *C.struct_libusb_device_des
 	u.Serial, err = getStringDescriptor(dh, ds.iSerialNumber, langid)
 	return err
 }
-
-/*func FindAll(vendor, product int) ([]*USBDev, error) {
-	ctx := new(C.struct_ftdi_context)
-	e := C.ftdi_init(ctx)
-	//	defer C.ftdi_deinit(ctx)
-	if e < 0 {
-		return nil, makeError(ctx, e)
-	}
-	var dl *C.struct_ftdi_device_list
-	e = C.ftdi_usb_find_all(ctx, &dl, C.int(vendor), C.int(product))
-	if e < 0 {
-		return nil, makeError(ctx, e)
-	}
-	defer C.ftdi_list_free2(dl)
-
-	n := 0
-	for el := dl; el != nil; el = el.next {
-		n++
-	}
-	ret := make([]*USBDev, n)
-	i := 0
-	for el := dl; el != nil; el = el.next {
-		u := new(USBDev)
-		u.d = el.dev
-		C.libusb_ref_device(el.dev)
-		runtime.SetFinalizer(u, (*USBDev).unref)
-		if err := u.getStrings(ctx); err != nil {
-			return nil, err
-		}
-		ret[i] = u
-		i++
-	}
-	return ret, nil
-}*/
 
 // FindAll search for all USB devices with specified vendor and  product id.
 // It returns slice od found devices.
@@ -249,6 +216,14 @@ func (d *Device) free() {
 	}
 	C.ftdi_free(d.ctx)
 	d.ctx = nil
+}
+
+func (d *Device) maxPacketSize() uint {
+	return uint(d.ctx._max_packet_size)
+}
+
+func (d *Device) readRemainingData() int {
+	return int(d.ctx._readbuffer_remaining)
 }
 
 func (d *Device) makeError(code C.int) error {
@@ -449,7 +424,7 @@ func (d *Device) Read(data []byte) (int, error) {
 	return int(n), nil
 }
 
-// Write writes data from buf to device. It retruns number of bytes written.
+// Write writes data from buf to device. It returns number of bytes written.
 func (d *Device) Write(data []byte) (int, error) {
 	n := C.ftdi_write_data(
 		d.ctx,
@@ -462,7 +437,7 @@ func (d *Device) Write(data []byte) (int, error) {
 	return int(n), nil
 }
 
-// WriteString writes bytes from string s to device. It retruns number of bytes written.
+// WriteString writes bytes from string s to device. It returns number of bytes written.
 func (d *Device) WriteString(s string) (int, error) {
 	// BUG: This will cause problems when string implementation changes.
 	type stringHeader struct {
@@ -515,7 +490,7 @@ func (d *Device) Pins() (b byte, err error) {
 // Baud rate. A value of 9600 Baud would transfer the data at (9600x16) = 153600
 // bytes per second, or 1 every 6.5 μS."
 //
-// FT232R suports baudrates from 183.1 baud to 3 Mbaud but for real applications
+// FT232R supports baudrates from 183.1 baud to 3 Mbaud but for real applications
 // it should be <= 1 Mbaud: Actual baudrate is set to discrete value that
 // satisfies the equation br = 3000000 / (n + x) where n can be an integer
 // between 2 and 16384 and x can be a sub-integer of the value 0, 0.125, 0.25,
@@ -682,6 +657,14 @@ func (d *Device) SubmitWrite(data []byte) (*Transfer, error) {
 		return nil, err
 	}
 	return (*Transfer)(unsafe.Pointer(tc)), nil
+}
+
+func (d *Device) MPSSEBitDelay() float64 {
+	// measured on FTDI2232H, not documented in datasheet, hence may vary
+	// from on FTDI model to another...
+	// left as a variable so it could be tweaked base on the FTDI bcd type,
+	// the frequency, or ... whatever else
+	return 0.5E-6 // seems to vary between 5 and 6.5 us
 }
 
 func (t *Transfer) Done() (int, error) {
