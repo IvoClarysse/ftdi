@@ -55,3 +55,7 @@ func (s *serialPort) SetRTS(val bool) error {
 
 	return s.dev.SetRTS(vl)
 }
+
+func (s *serialPort) SetParity(_ Parity) error {
+	return nil
+}
