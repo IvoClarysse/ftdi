@@ -12,10 +12,14 @@ package ftdi
 import "C"
 
 import (
-	"errors"
 	"runtime"
+	"sync/atomic"
 	"unicode/utf16"
 	"unsafe"
+
+	"github.com/pkg/errors"
+
+	"github.com/notifai/serial"
 )
 
 func makeError(ctx *C.struct_ftdi_context, code C.int) error {
@@ -26,26 +30,6 @@ func makeError(ctx *C.struct_ftdi_context, code C.int) error {
 		code: int(code),
 		str:  C.GoString(C.ftdi_get_error_string(ctx)),
 	}
-}
-
-type USBDev struct {
-	Manufacturer string
-	Description  string
-	Serial       string
-	d            *C.struct_libusb_device
-}
-
-func (u *USBDev) unref() {
-	if u.d == nil {
-		panic("USBDev.unref on uninitialized device")
-	}
-	C.libusb_unref_device(u.d)
-	u.d = nil // Help GC.
-}
-
-func (u *USBDev) Close() {
-	runtime.SetFinalizer(u, nil)
-	u.unref()
 }
 
 func getLangId(dh *C.libusb_device_handle) (C.uint16_t, error) {
@@ -87,98 +71,14 @@ func getStringDescriptor(dh *C.libusb_device_handle, id C.uint8_t, langid C.uint
 	return string(utf16.Decode(uni16)), nil
 }
 
-// getStrings updates Manufacturer, Description, Serial strings descriptors
-// in unicode form. It doesn't use ftdi_usb_get_strings because libftdi
-// converts  unicode strings to ASCII.
-func (u *USBDev) getStrings(dev *C.libusb_device, ds *C.struct_libusb_device_descriptor) error {
-	var (
-		err error
-		dh  *C.libusb_device_handle
-	)
-	if e := C.libusb_open(dev, &dh); e != 0 {
-		return USBError(e)
-	}
-	defer C.libusb_close(dh)
-	langid, err := getLangId(dh)
-	if err != nil {
-		return err
-	}
-	u.Manufacturer, err = getStringDescriptor(dh, ds.iManufacturer, langid)
-	if err != nil {
-		return err
-	}
-	u.Description, err = getStringDescriptor(dh, ds.iProduct, langid)
-	if err != nil {
-		return err
-	}
-	u.Serial, err = getStringDescriptor(dh, ds.iSerialNumber, langid)
-	return err
-}
-
-// FindAll search for all USB devices with specified vendor and  product id.
-// It returns slice od found devices.
-func FindAll(vendor, product int) ([]*USBDev, error) {
-	if e := C.libusb_init(nil); e != 0 {
-		return nil, USBError(e)
-	}
-	var dptr **C.struct_libusb_device
-	if e := C.libusb_get_device_list(nil, &dptr); e < 0 {
-		return nil, USBError(e)
-	}
-	defer C.libusb_free_device_list(dptr, 1)
-	devs := (*[1 << 28]*C.libusb_device)(unsafe.Pointer(dptr))
-
-	var n int
-	for i, dev := range devs[:] {
-		if dev == nil {
-			n = i
-			break
-		}
-	}
-	descr := make([]*C.struct_libusb_device_descriptor, n)
-	for i, dev := range devs[:n] {
-		var ds C.struct_libusb_device_descriptor
-		if e := C.libusb_get_device_descriptor(dev, &ds); e < 0 {
-			return nil, USBError(e)
-		}
-		if int(ds.idVendor) == vendor && int(ds.idProduct) == product {
-			descr[i] = &ds
-			continue
-		}
-		if vendor == 0 && product == 0 && ds.idVendor == 0x403 {
-			switch ds.idProduct {
-			case 0x6001, 0x6010, 0x6011, 0x6014, 0x6015:
-				descr[i] = &ds
-				continue
-			}
-		}
-		n--
-	}
-	if n == 0 {
-		return nil, nil
-	}
-	ret := make([]*USBDev, n)
-	n = 0
-	for i, ds := range descr {
-		if ds == nil {
-			continue
-		}
-		u := new(USBDev)
-		u.d = devs[i]
-		C.libusb_ref_device(u.d)
-		runtime.SetFinalizer(u, (*USBDev).unref)
-		if err := u.getStrings(u.d, ds); err != nil {
-			return nil, err
-		}
-		ret[n] = u
-		n++
-	}
-	return ret, nil
-}
-
 // Device represents FTDI device.
 type Device struct {
-	ctx *C.struct_ftdi_context
+	ctx      *C.struct_ftdi_context
+	acquired uintptr
+	pinMask  uint16
+	gpioDir  uint16
+	gpioMask uint16
+	gpioLo   uint8
 }
 
 // Type is numeric type id of FTDI device.
@@ -210,6 +110,14 @@ func (d *Device) Type() Type {
 	return Type(d.ctx._type)
 }
 
+func (d *Device) acquire() bool {
+	return atomic.CompareAndSwapUintptr(&d.acquired, 0, 1)
+}
+
+func (d *Device) release() {
+	atomic.StoreUintptr(&d.acquired, 0)
+}
+
 func (d *Device) free() {
 	if d.ctx == nil {
 		panic("Device.free on uninitialized device")
@@ -219,11 +127,11 @@ func (d *Device) free() {
 }
 
 func (d *Device) maxPacketSize() uint {
-	return uint(d.ctx._max_packet_size)
+	return uint(d.ctx.max_packet_size)
 }
 
 func (d *Device) readRemainingData() int {
-	return int(d.ctx._readbuffer_remaining)
+	return int(d.ctx.readbuffer_remaining)
 }
 
 func (d *Device) makeError(code C.int) error {
@@ -238,7 +146,7 @@ func (d *Device) close() error {
 	return nil
 }
 
-// Close closes device
+// Close device
 func (d *Device) Close() error {
 	runtime.SetFinalizer(d, nil)
 	return d.close()
@@ -249,7 +157,12 @@ func makeDevice(c Channel) (*Device, error) {
 	if ctx == nil {
 		return nil, err
 	}
-	d := &Device{ctx}
+
+	d := &Device{
+		ctx:      ctx,
+		acquired: 0,
+	}
+
 	if c != ChannelAny {
 		if e := C.ftdi_set_interface(d.ctx, uint32(c)); e < 0 {
 			defer d.free()
@@ -270,21 +183,6 @@ const (
 	ChannelC
 	ChannelD
 )
-
-// OpenUSBDev opens channel (interface) c of USB device u.
-// u must be FTDI device.
-func OpenUSBDev(u *USBDev, c Channel) (*Device, error) {
-	d, err := makeDevice(c)
-	if err != nil {
-		return nil, err
-	}
-	if e := C.ftdi_usb_open_dev(d.ctx, u.d); e < 0 {
-		defer d.free()
-		return nil, d.makeError(e)
-	}
-	runtime.SetFinalizer(d, (*Device).close)
-	return d, nil
-}
 
 // OpenFirst opens the first device with a given vendor and product ids. Uses
 // specified channel c.
@@ -343,6 +241,26 @@ const (
 	ModeSyncFF
 	ModeFT1284
 )
+
+func (d *Device) AsSerial() (serial.Port, error) {
+	var err error
+
+	if !d.acquire() {
+		return nil, errors.Errorf("ftdi: port is busy")
+	}
+	defer func() {
+		if err != nil {
+			d.release()
+		}
+	}()
+
+	if err = d.SetBitmode(0, ModeReset); err != nil {
+		return nil, err
+	}
+
+	port := &serialPort{dev: d}
+	return port, nil
+}
 
 // SetBitmode sets operation mode for device d to mode. iomask bitmask
 // configures lines corresponding to its bits as input (bit=0) or output (bit=1).

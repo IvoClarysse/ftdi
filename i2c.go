@@ -130,6 +130,10 @@ type I2CController struct {
 	ckDelay      uint8
 }
 
+func NewI2CController() {
+
+}
+
 func (ctrl *I2CController) Read(data []byte, opts ...I2COption) (int, error) {
 	ctrl.mu.Lock()
 	defer ctrl.mu.Unlock()
