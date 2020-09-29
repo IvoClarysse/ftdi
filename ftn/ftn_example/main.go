@@ -1,15 +1,17 @@
+// +build linux
+
 package main
 
 import (
 	"fmt"
 	"os"
 
-	"github.com/ziutek/ftdi/ftn"
+	"github.com/notifai/ftdi/ftn"
 )
 
 func checkErr(err error) {
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		_, _ = fmt.Fprintln(os.Stderr, err)
 	}
 }
 

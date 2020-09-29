@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/ziutek/ftdi"
+	"github.com/notifai/ftdi"
 	"log"
 	"time"
 )

@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"github.com/ziutek/ftdi"
+	"github.com/notifai/ftdi"
 	"os"
 	"strconv"
 )

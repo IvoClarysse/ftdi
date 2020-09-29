@@ -1,4 +1,4 @@
-module github.com/ziutek/ftdi
+module github.com/notifai/ftdi
 
 go 1.15
 

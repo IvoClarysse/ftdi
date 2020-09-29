@@ -10,7 +10,7 @@ package main
 
 import (
 	"fmt"
-	"github.com/ziutek/ftdi"
+	"github.com/notifai/ftdi"
 	"github.com/ziutek/lcd/hdc"
 	"os"
 	"time"
